@@ -1,0 +1,11 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+devices/keystore/*
+!devices/keystore/.gitkeep
+fog/tls/*
+!fog/tls/.gitkeep
+fog/auth/psk_store.json
+registry/data/*.json
