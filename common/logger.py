@@ -24,6 +24,15 @@ _COLOURS = {
 }
 
 
+_QUIET = False
+
+
+def set_quiet(quiet: bool) -> None:
+    """Silence per event logs (used by benchmarks so printing does not distort timings)."""
+    global _QUIET
+    _QUIET = quiet
+
+
 def _c(name: str, text: str) -> str:
     return f"{_COLOURS[name]}{text}{_COLOURS['reset']}"
 
@@ -33,6 +42,8 @@ def _now() -> str:
 
 
 def _emit(tag: str, colour: str, source: str, msg: str) -> None:
+    if _QUIET:
+        return
     print(f"{_c('dim', _now())} {_c(colour, tag.ljust(6))} {_c('bold', source.ljust(10))} {msg}", flush=True)
 
 

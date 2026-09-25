@@ -1,0 +1,13 @@
+attack,result,detected_by,as_expected
+0. unmodified proof package,ACCEPTED,all checks passed,True
+1. modified DID (leaf recomputed to match),REJECTED,Merkle verifier,True
+2. temp01's DID with the attacker's public key,REJECTED,Merkle verifier,True
+3. attacker's own DID+PK with temp01's proof path,REJECTED,Merkle verifier,True
+3b. only the leaf field swapped for camera01's leaf,REJECTED,identity check,True
+4. one bit flipped in sibling hash 0,REJECTED,Merkle verifier,True
+5. left/right order of sibling 0 swapped,REJECTED,Merkle verifier,True
+6. last sibling removed from the path,REJECTED,Merkle verifier,True
+7. epoch 1 proof presented as epoch 2 (wrong root),REJECTED,Merkle verifier,True
+8. claims an epoch that was never anchored,REJECTED,root registry,True
+9. camera01 key changed after anchoring,REJECTED,root comparison,True
+10. anchored root edited in ledger file,REJECTED,ledger verify_chain,True

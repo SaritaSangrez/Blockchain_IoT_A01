@@ -106,28 +106,43 @@ class MerkleTree:
     @staticmethod
     def verify_proof(leaf: HexOrBytes, proof_path: ProofPath, root: HexOrBytes) -> bool:
         """
-        Recompute the root from a leaf and its proof path.
-        Returns False (never raises) on any malformed input, because the
-        verifier receives these values from untrusted devices.
+        Recompute the root from a leaf and its proof path and compare it with
+        the trusted root. Returns False (never raises) on malformed input,
+        because the verifier receives these values from untrusted devices.
         """
         try:
-            current = _as_bytes(leaf)
             expected = _as_bytes(root)
-            if len(current) != HASH_LEN or len(expected) != HASH_LEN:
-                return False
-            for step in proof_path:
-                sibling = _as_bytes(step["sibling"])
-                if len(sibling) != HASH_LEN:
-                    return False
-                if step["side"] == "L":
-                    current = node_hash(sibling, current)
-                elif step["side"] == "R":
-                    current = node_hash(current, sibling)
-                else:
-                    return False
-            return current == expected
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, TypeError):
             return False
+        if len(expected) != HASH_LEN:
+            return False
+        reconstructed = reconstruct_root(leaf, proof_path)
+        return reconstructed is not None and reconstructed == expected
+
+
+def reconstruct_root(leaf: HexOrBytes, proof_path: ProofPath):
+    """
+    Climb from the leaf to the root using the proof path.
+    Returns the candidate root (32 bytes) or None if the input is malformed.
+    Used by the verifier and by the demo/attack scripts to SHOW the root.
+    """
+    try:
+        current = _as_bytes(leaf)
+        if len(current) != HASH_LEN:
+            return None
+        for step in proof_path:
+            sibling = _as_bytes(step["sibling"])
+            if len(sibling) != HASH_LEN:
+                return None
+            if step["side"] == "L":
+                current = node_hash(sibling, current)
+            elif step["side"] == "R":
+                current = node_hash(current, sibling)
+            else:
+                return None
+        return current
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def compute_root(leaves: Sequence[bytes]) -> bytes:
