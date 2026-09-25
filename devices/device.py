@@ -6,9 +6,12 @@ its DID from the public key, and runs the onboarding protocol with the fog:
     1. PSK bootstrap over TLS   -> session
     2. send DID + PK            -> challenge
     3. sign challenge           -> proof of possession
+    4. send metadata            -> leaf queued in the open batch
+    5. after the epoch closes   -> fetch and verify its proof package
 
 Quick run from the project root (fog must be running):
-    python devices/device.py temp01
+    python devices/device.py temp01 camera01
+Each device uses a fresh key pair every run, so you can rerun freely.
 """
 from __future__ import annotations
 
@@ -72,6 +75,8 @@ class Device:
         self.pk_bytes = public_key_bytes(self.private_key)
         self.did = derive_did(self.pk_bytes)
         self.session_id: Optional[str] = None
+        self.leaf: Optional[str] = None
+        self.proof_package: Optional[dict] = None
         self.timings: dict = {}
 
     @property
@@ -116,6 +121,49 @@ class Device:
         self._log(ok, f"proof of possession accepted, status {data['status']}")
         return data
 
+    def submit_metadata(self, device_type: Optional[str] = None, role: Optional[str] = None,
+                        vendor: str = config.DEFAULT_VENDOR, zone: str = config.FOG_ZONE) -> dict:
+        default_type, default_role = config.DEMO_DEVICES.get(self.name, config.SIM_DEVICE_TYPE)
+        body = {
+            "session_id": self.session_id,
+            "device_name": self.name,
+            "device_type": device_type or default_type,
+            "zone": zone,
+            "vendor": vendor,
+            "role": role or default_role,
+        }
+        data = self._post("submit_metadata", "/register/metadata", json=body)
+        self.leaf = data["leaf"]
+        self._log(ok, f"metadata accepted, leaf {short(data['leaf'])} queued for epoch "
+                      f"{data['epoch_id']} (batch size {data['batch_size']})")
+        return data
+
+    def fetch_proof(self, epoch_id: Optional[int] = None) -> dict:
+        params = {"epoch_id": epoch_id} if epoch_id is not None else None
+        r = self.client.get(f"/proof/{self.did}", params=params)
+        if r.status_code != 200:
+            raise RegistrationError("fetch_proof", r.status_code, r.json().get("detail", r.text))
+        self.proof_package = r.json()
+        self._log(ok, f"received proof package: epoch {self.proof_package['epoch_id']}, "
+                      f"{len(self.proof_package['proof_path'])} sibling hashes")
+        return self.proof_package
+
+    def save_proof(self, keystore_dir: Path = config.KEYSTORE_DIR) -> Path:
+        path = Path(keystore_dir) / f"{self.name}_proof.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.proof_package, indent=2), encoding="utf-8")
+        return path
+
+    def register(self) -> dict:
+        """Full Phase 1 device side: PSK, DID + PK, PoP, metadata."""
+        t0 = time.perf_counter()
+        self.register_start()
+        challenge = self.submit_public_key()
+        self.prove_possession(challenge)
+        result = self.submit_metadata()
+        self.timings["register_seconds"] = time.perf_counter() - t0
+        return result
+
     def onboard(self) -> dict:
         """Steps 1 to 5 end to end, with timing for the registration latency metric."""
         t0 = time.perf_counter()
@@ -134,9 +182,9 @@ if __name__ == "__main__":
     names = sys.argv[1:] or ["temp01"]
     for n in names:
         step(f"Onboarding device {n}")
-        d = Device(n)
+        d = Device(n, persist_key=False)
         try:
-            d.onboard()
+            d.register()
         except RegistrationError as e:
             fail(n, str(e))
         except httpx.ConnectError:

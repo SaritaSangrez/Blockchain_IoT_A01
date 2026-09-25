@@ -30,6 +30,11 @@ def main():
     ok("fog", f"fog signing public key {ctx.fog_public_key_hex[:20]}...")
     valid, msg = ctx.ledger.verify_chain()
     (ok if valid else fail)("ledger", msg)
+    info("fog", f"open epoch {ctx.epochs.current_epoch_id}, carry forward active devices = {config.CARRY_FORWARD_ACTIVE}")
+    if config.AUTO_EPOCH_SECONDS > 0:
+        ctx.epochs.start_auto_close(config.AUTO_EPOCH_SECONDS)
+    else:
+        info("fog", "epochs close manually (POST /epoch/close, or run the demo script)")
     info("fog", f"listening on {config.FOG_BASE_URL}  (TLS enabled)")
 
     uvicorn.run(

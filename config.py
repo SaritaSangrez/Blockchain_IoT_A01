@@ -66,3 +66,18 @@ DEMO_DEVICES = {
 
 # Extra simulated devices for benchmarks: sim0001 ... sim{N}
 SIM_DEVICE_COUNT = 1000
+
+# Epochs
+# Admin key for operator actions such as closing an epoch (demo value, not a secret).
+ADMIN_KEY = "fog_admin_demo_key"
+# If > 0, the fog closes the current epoch automatically every N seconds
+# (only when devices are waiting). 0 means close manually via POST /epoch/close.
+AUTO_EPOCH_SECONDS = 0
+# True: each new epoch root commits to ALL active devices (previously registered,
+# not revoked) plus the new batch, so a revoked device disappears from the next root.
+# False: each epoch root commits only to its own new batch.
+CARRY_FORWARD_ACTIVE = True
+
+# Default metadata values for simulated devices
+DEFAULT_VENDOR = "Acme"
+SIM_DEVICE_TYPE = ("temperature_sensor", "sensor")

@@ -19,6 +19,7 @@ from common.crypto_utils import derive_did, load_public_key
 from common.logger import fail, info, ok, short
 from common.schemas import (
     ChallengeResponse,
+    MetadataRequest,
     DeviceRecord,
     DeviceStatus,
     PopRequest,
@@ -28,7 +29,9 @@ from common.schemas import (
 )
 from fog.auth.psk import parse_authorization
 from fog.registration.pop import issue_challenge, verify_pop
-from fog.storage.device_store import AUTHENTICATED, KEY_SUBMITTED, POP_VERIFIED
+from fog.batch.epoch_manager import EpochError
+from fog.registration.validation import validate_metadata
+from fog.storage.device_store import AUTHENTICATED, KEY_SUBMITTED, METADATA_ACCEPTED, POP_VERIFIED
 
 router = APIRouter(prefix="/register", tags=["registration"])
 SRC = "fog"
@@ -91,9 +94,12 @@ def register_pubkey(body: PublicKeyRequest, request: Request):
         raise HTTPException(status_code=400, detail="DID does not match public key fingerprint")
 
     existing = ctx.devices.get(body.did)
-    if (existing and existing.status == DeviceStatus.REVOKED) or ctx.sessions.did_in_use(body.did, s.session_id):
-        fail(SRC, f"rejected: DID {body.did} is revoked or already being onboarded")
-        raise HTTPException(status_code=409, detail="DID revoked or already in an onboarding session")
+    if existing is not None:
+        fail(SRC, f"rejected: DID {body.did} already known with status {existing.status.value}")
+        raise HTTPException(status_code=409, detail=f"DID already known (status {existing.status.value})")
+    if ctx.sessions.did_in_use(body.did, s.session_id):
+        fail(SRC, f"rejected: DID {body.did} is already in another onboarding session")
+        raise HTTPException(status_code=409, detail="DID already in an onboarding session")
 
     s.did = body.did
     s.public_key = body.public_key
@@ -122,3 +128,41 @@ def register_pop(body: PopRequest, request: Request):
     ctx.devices.upsert(DeviceRecord(did=s.did, public_key=s.public_key, status=DeviceStatus.PENDING))
     ok(SRC, f"proof of possession PASSED for {s.did}: device owns the private key")
     return PopResponse(session_id=s.session_id, did=s.did, status=POP_VERIFIED)
+
+
+@router.post("/metadata")
+def register_metadata(body: MetadataRequest, request: Request):
+    """
+    Step 6 to 8: validate metadata, create L_d = H(DID || PK), add it to the open batch.
+    The tree is NOT rebuilt here; that happens once per epoch in finalize_epoch().
+    """
+    ctx = _ctx(request)
+    s = _session_or_404(ctx, body.session_id)
+    _require_state(s, POP_VERIFIED)
+
+    errors = validate_metadata(body, ctx.zone, ctx.allowed_types)
+    if errors:
+        for e in errors:
+            fail(SRC, f"metadata rejected for {s.did}: {e}")
+        raise HTTPException(status_code=422, detail={"metadata_errors": errors})
+
+    record = ctx.devices.get(s.did)
+    record.device_name, record.device_type = body.device_name, body.device_type
+    record.zone, record.vendor, record.role = body.zone, body.vendor, body.role
+
+    try:
+        leaf_hex = ctx.epochs.add_leaf(s.did, bytes.fromhex(s.public_key))
+    except EpochError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    record.leaf = leaf_hex
+    s.state = METADATA_ACCEPTED
+
+    ok(SRC, f"metadata accepted for {body.device_name} ({body.device_type}, role {body.role})")
+    info(SRC, f"leaf L_d = H(DID || PK) = {leaf_hex}")
+    return {
+        "did": s.did,
+        "leaf": leaf_hex,
+        "epoch_id": ctx.epochs.current_epoch_id,
+        "batch_size": ctx.epochs.batch_size(),
+        "status": "QUEUED_FOR_BATCH",
+    }

@@ -16,6 +16,8 @@ from fastapi import FastAPI
 import config
 from common.crypto_utils import load_or_create_private_key, public_key_bytes
 from fog.auth.psk import PSKStore
+from fog.batch.epoch_manager import EpochManager
+from fog.batch.routes import router as epoch_router
 from fog.registration.routes import router as registration_router
 from fog.storage.device_store import DeviceStore, SessionStore
 from registry.ledger import Ledger
@@ -30,7 +32,10 @@ class FogContext:
     sessions: SessionStore
     devices: DeviceStore
     ledger: Ledger
+    epochs: EpochManager
     challenge_ttl: int
+    admin_key: str
+    allowed_types: set
 
     @property
     def fog_public_key_hex(self) -> str:
@@ -44,22 +49,32 @@ def create_app(
     ledger_path: Path = config.LEDGER_PATH,
     challenge_ttl: int = config.CHALLENGE_TTL_SECONDS,
     session_ttl: int = config.SESSION_TTL_SECONDS,
+    carry_forward: bool = config.CARRY_FORWARD_ACTIVE,
+    admin_key: str = config.ADMIN_KEY,
+    verbose: bool = True,
 ) -> FastAPI:
     signing_key = load_or_create_private_key(signing_key_path)
+    devices = DeviceStore()
+    ledger = Ledger(ledger_path, signing_key, fog_id=config.FOG_ID)
     ctx = FogContext(
         fog_id=config.FOG_ID,
         zone=config.FOG_ZONE,
         signing_key=signing_key,
         psk_store=PSKStore(path=psk_store_path, entries=psk_entries),
         sessions=SessionStore(ttl_seconds=session_ttl),
-        devices=DeviceStore(),
-        ledger=Ledger(ledger_path, signing_key, fog_id=config.FOG_ID),
+        devices=devices,
+        ledger=ledger,
+        epochs=EpochManager(ledger, signing_key, config.FOG_ID, devices,
+                            carry_forward=carry_forward, verbose=verbose),
         challenge_ttl=challenge_ttl,
+        admin_key=admin_key,
+        allowed_types=set(config.ALLOWED_DEVICE_TYPES),
     )
 
     app = FastAPI(title="IIoT Fog Node", version="1.0")
     app.state.ctx = ctx
     app.include_router(registration_router)
+    app.include_router(epoch_router)
     # Partner routers (tokens, verification, revocation) get included here later.
 
     @app.get("/health")
@@ -71,6 +86,8 @@ def create_app(
             "fog_public_key": ctx.fog_public_key_hex,
             "registered_psks": len(ctx.psk_store),
             "anchored_epochs": len(ctx.ledger),
+            "current_epoch": ctx.epochs.current_epoch_id,
+            "batch_size": ctx.epochs.batch_size(),
         }
 
     return app
