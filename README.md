@@ -75,11 +75,14 @@ CSV files go to `benchmarks/results`, graphs to `benchmarks/graphs`.
 
 Additional endpoint table rows:
 
-| POST | /tokens/issue | temporary signed token for a device waiting on the batch |
-| POST | /tokens/access | token + fresh nonce + fresh PoP signature -> ALLOW/DENY |
-| POST | /verify | Merkle proof + revocation + access-policy check -> ALLOW/DENY |
-| POST | /revocation/revoke | admin: revoke a device (and optionally one token_id) immediately |
-| GET | /revocation/status/{did} | current revocation status |
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/tokens/issue` | temporary signed token for a device waiting on the batch |
+| POST | `/tokens/access` | token + fresh nonce + fresh PoP signature -> ALLOW/DENY |
+| POST | `/verify` | Merkle proof + revocation + access-policy check -> ALLOW/DENY |
+| POST | `/revocation/revoke` | admin: revoke a device (and optionally one `token_id`) immediately |
+| GET | `/revocation/status/{did}` | current revocation status |
+
 
 ## Phase 2 / 3 demo, attacks, benchmarks, tests (Member B)
 
