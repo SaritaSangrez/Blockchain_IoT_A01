@@ -1,0 +1,2 @@
+n_devices,verification_latency_ms_mean,verification_latency_ms_std,token_access_latency_ms_mean,token_access_latency_ms_std,throughput_sequential_rps_mean,throughput_sequential_rps_std,throughput_concurrent_rps_mean,throughput_concurrent_rps_std
+5,2044.4554200046693,,3.2205200055614114,,0.49104234658813833,,2.4421297070905505,

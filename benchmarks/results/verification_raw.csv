@@ -1,0 +1,2 @@
+n_devices,run,verification_latency_ms,token_access_latency_ms,throughput_sequential_rps,throughput_concurrent_rps
+5,1,2044.4554200046693,3.2205200055614114,0.49104234658813833,2.4421297070905505

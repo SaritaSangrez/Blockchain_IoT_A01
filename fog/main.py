@@ -22,6 +22,10 @@ from fog.registration.routes import router as registration_router
 from fog.storage.device_store import DeviceStore, SessionStore
 from registry.ledger import Ledger
 
+from fog.revocation.routes import router as revocation_router
+from fog.tokens.routes import router as tokens_router
+from fog.tokens.store import TokenState
+from fog.verification.routes import router as verification_router
 
 @dataclass
 class FogContext:
@@ -36,6 +40,7 @@ class FogContext:
     challenge_ttl: int
     admin_key: str
     allowed_types: set
+    token_state: TokenState
 
     @property
     def fog_public_key_hex(self) -> str:
@@ -69,13 +74,16 @@ def create_app(
         challenge_ttl=challenge_ttl,
         admin_key=admin_key,
         allowed_types=set(config.ALLOWED_DEVICE_TYPES),
+        token_state=TokenState(),
     )
 
     app = FastAPI(title="IIoT Fog Node", version="1.0")
     app.state.ctx = ctx
     app.include_router(registration_router)
     app.include_router(epoch_router)
-    # Partner routers (tokens, verification, revocation) get included here later.
+    app.include_router(revocation_router)
+    app.include_router(tokens_router)
+    app.include_router(verification_router)
 
     @app.get("/health")
     def health():

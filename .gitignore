@@ -9,3 +9,5 @@ fog/tls/*
 !fog/tls/.gitkeep
 fog/auth/psk_store.json
 registry/data/*.json
+k.pem
+l.json
