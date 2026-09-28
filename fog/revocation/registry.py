@@ -1,21 +1,23 @@
 """
 Revocation (Member B).
 
-Revoking a device just means flipping its status to DeviceStatus.REVOKED
-in Member A's DeviceStore. That one flag already does two things for us,
-for free, because of how the rest of the project reads device status:
+Two levels, both effective IMMEDIATELY:
 
-  - fog/batch/routes.py's GET /proof/{did} already refuses to hand out a
-    NEW proof for a REVOKED device.
-  - fog/batch/epoch_manager.py's finalize_epoch() already drops REVOKED
-    devices from every FUTURE epoch root.
+  revoke_device()  flips the device's status to DeviceStatus.REVOKED in the
+                   fog's DeviceStore and blacklists every token it was issued.
+                   Because every component reads that one status flag:
+                     * /tokens/access and /verify deny it on the very next request
+                     * GET /proof/{did} (Member A) refuses to hand out new proofs
+                     * finalize_epoch() (Member A) leaves it out of every FUTURE
+                       epoch root, so it is not in the new active set
 
-What neither of those covers: a device that already has an OLD, still
-cryptographically valid proof package from before it was revoked. That
-proof will still pass verify_proof_package() -- the math doesn't know
-about revocation. So Phase 3 verification (next phase) must call
-is_device_revoked() itself, on every request, on top of the proof check.
-That's what makes revocation "immediate" instead of "starting next epoch".
+  revoke_token()   blacklists one token_id only (e.g. a leaked token) without
+                   revoking the device itself.
+
+What revocation does NOT (and should not) change: a proof package issued
+before revocation still verifies against the root of ITS epoch, because that
+root is immutable history ("was this device registered in epoch 1?" -> yes).
+Whether the device may act NOW is a separate check, done on every request.
 """
 from __future__ import annotations
 
@@ -24,13 +26,28 @@ from common.schemas import DeviceStatus
 from fog.storage.device_store import DeviceStore
 
 
-def revoke_device(devices: DeviceStore, did: str) -> bool:
-    """Marks a device REVOKED. Returns False if the DID is unknown.
-    Safe to call twice on the same device (idempotent)."""
+def revoke_device(devices: DeviceStore, did: str, token_state=None) -> bool:
+    """Marks a device REVOKED (and all its tokens, if token_state is given).
+    Returns False if the DID is unknown. Idempotent."""
     if devices.get(did) is None:
         return False
     devices.set_status(did, DeviceStatus.REVOKED)
-    warn("revocation", f"device {did} revoked")
+    revoked_tokens = []
+    if token_state is not None:
+        for tid in token_state.tokens_of(did):
+            token_state.revoke(tid)
+            revoked_tokens.append(tid)
+    warn("revocation", f"device {did} revoked" +
+         (f", tokens {revoked_tokens} blacklisted" if revoked_tokens else ""))
+    return True
+
+
+def revoke_token(token_state, token_id: str) -> bool:
+    """Blacklists one token. Returns False if this fog never issued it."""
+    if not token_state.was_issued(token_id):
+        return False
+    token_state.revoke(token_id)
+    warn("revocation", f"token {token_id} revoked (device itself not revoked)")
     return True
 
 

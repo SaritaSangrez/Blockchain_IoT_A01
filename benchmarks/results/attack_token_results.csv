@@ -1,0 +1,5 @@
+attack,expected,decision,reason,detected_by,as_expected
+1 replay of exact request,DENY nonce_reused,DENY,nonce_reused,nonce validator,yes
+2 stolen valid token,DENY proof_of_possession_failed,DENY,proof_of_possession_failed,proof of possession check,yes
+3a expired token,DENY expired,DENY,expired,token expiry check,yes
+3b revoked token,DENY revoked,DENY,revoked,revocation checker,yes

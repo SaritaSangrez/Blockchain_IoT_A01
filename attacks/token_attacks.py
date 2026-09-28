@@ -1,13 +1,24 @@
 """
-ATTACKS (Member B): replay, stolen valid token, expired/revoked token.
+ATTACKS (Member B): replay, stolen token, expired token, revoked token.
 
-Runs the fog in process (FastAPI TestClient, temporary paths) -- no
-certificates or running server needed, same idea as attacks/tamper_proof.py.
+  1   replay of an exact request   -> DENY nonce_reused                (nonce validator)
+  2   stolen valid token           -> DENY proof_of_possession_failed  (proof of possession check)
+  3a  expired token                -> DENY expired                     (token expiry check)
+  3b  revoked token                -> DENY revoked                     (revocation checker)
+
+Every attack runs against a fresh fog created in process (FastAPI TestClient,
+temporary signing key and ledger, fresh PSKs), so nothing touches the demo
+ledger and token expiry can be shown in under a second. The victim device
+goes through the REAL protocol first: PSK, DID/PK, proof of possession,
+metadata (leaf queued), then a temporary token.
+
+Results are also saved to benchmarks/results/attack_token_results.csv.
 
 Run from the project root:   python attacks/token_attacks.py
 """
 from __future__ import annotations
 
+import csv
 import secrets
 import sys
 import tempfile
@@ -18,100 +29,127 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient
 
-from common.crypto_utils import generate_keypair, sign
+import config
 from common.logger import fail, info, ok, step
 from devices.device import Device
+from devices.runtime_client import build_token_request, get_token_nonce, request_token, token_access
 from fog.auth.psk import PSKStore
 from fog.main import create_app
-from fog.revocation.registry import revoke_device
-from fog.tokens.tokens import access_message, issue_token
+from fog.tokens.tokens import issue_token
 
+RESULTS_CSV = Path(__file__).resolve().parent.parent / "benchmarks" / "results" / "attack_token_results.csv"
+ADMIN = {"X-Admin-Key": config.ADMIN_KEY}
+RESOURCE, OPERATION = "temperature_sensor", "write"
 results = []
 
 
-def record(title, passed):
-    (ok if passed else fail)("attack", f"{title}: {'DETECTED as expected' if passed else 'NOT DETECTED -- PROBLEM'}")
-    results.append((title, passed))
+def record(attack: str, expected: str, response: dict, passed: bool):
+    (ok if passed else fail)("attack", f"{attack}: {'DETECTED' if passed else 'NOT DETECTED -- PROBLEM'} -> "
+                                       f"{response.get('decision')} / {response.get('reason')} / "
+                                       f"{response.get('detected_by')}")
+    results.append({"attack": attack, "expected": expected, "decision": response.get("decision"),
+                    "reason": response.get("reason"), "detected_by": response.get("detected_by"),
+                    "as_expected": "yes" if passed else "NO"})
 
+
+# ---------- environment ----------
 
 def make_env():
-    psk = secrets.token_hex(32)
+    names = ["temp01", "attacker01"]
+    psks = {n: secrets.token_hex(32) for n in names}
     tmp = Path(tempfile.mkdtemp())
-    app = create_app(psk_entries={"temp01": PSKStore.hash_psk(psk)},
+    app = create_app(psk_entries={n: PSKStore.hash_psk(p) for n, p in psks.items()},
                      signing_key_path=tmp / "k.pem", ledger_path=tmp / "l.json", verbose=False)
-    return app, TestClient(app), psk
+    return app, TestClient(app), psks
 
 
-def get_token(client, name, psk, device_type="temperature_sensor", role="sensor"):
-    d = Device(name, psk=psk, client=client, persist_key=False, verbose=False)
+def queued_device(client, psks, name="temp01") -> Device:
+    """PSK + DID/PK + PoP + metadata: authenticated and queued in the open batch."""
+    d = Device(name, psk=psks[name], client=client, persist_key=False, verbose=False)
     d.register_start()
-    challenge = d.submit_public_key()
-    d.prove_possession(challenge)
-    r = client.post("/tokens/issue", json={"session_id": d.session_id, "device_type": device_type, "role": role})
-    assert r.status_code == 200, r.text
-    return d, r.json()
+    d.prove_possession(d.submit_public_key())
+    d.submit_metadata()
+    return d
 
+
+# ---------- attacks ----------
 
 def attack_replay():
     step("ATTACK 1: replay of an exact request")
-    _, client, psk = make_env()
-    d, token = get_token(client, "temp01", psk)
-    nonce = "n-1"
-    sig = sign(d.private_key, access_message(token["token_id"], token["did"], nonce)).hex()
-    body = {"token": token, "nonce": nonce, "signature": sig, "operation": "read"}
-
-    r1 = client.post("/tokens/access", json=body)
-    r2 = client.post("/tokens/access", json=body)  # exact same request replayed
-    info("attack", f"first request -> {r1.json()}   |   replayed -> {r2.json()}")
-    record("replay of exact request", r1.json()["decision"] == "ALLOW" and r2.json()["reason"] == "nonce_reused")
+    _, client, psks = make_env()
+    d = queued_device(client, psks)
+    token = request_token(d)
+    first, captured = token_access(d, token, RESOURCE, OPERATION)
+    info("attack", f"genuine request with fog nonce {captured['nonce'][:8]}... -> {first['decision']}")
+    replayed = client.post("/tokens/access", json=captured).json()      # byte-identical resend
+    info("attack", f"attacker resends the captured request unchanged (same nonce) -> {replayed}")
+    record("1 replay of exact request", "DENY nonce_reused", replayed,
+           first["decision"] == "ALLOW" and replayed.get("reason") == "nonce_reused")
 
 
 def attack_stolen_token():
-    step("ATTACK 2: stolen valid token used without the private key")
-    _, client, psk = make_env()
-    d, token = get_token(client, "temp01", psk)
+    step("ATTACK 2: stolen valid token used from another device")
+    _, client, psks = make_env()
+    victim = queued_device(client, psks, "temp01")
+    token = request_token(victim)
+    attacker = Device("attacker01", psk=psks["attacker01"], client=client, persist_key=False, verbose=False)
+    info("attack", f"attacker {attacker.did} copied token {token['token_id']} of {victim.did}")
+    nonce = get_token_nonce(client, token["token_id"])
+    body = build_token_request(attacker.private_key, token, nonce, RESOURCE, OPERATION)
+    r = client.post("/tokens/access", json=body).json()
+    info("attack", f"token genuine and unexpired, nonce fresh, but signed with the ATTACKER's key -> {r}")
+    record("2 stolen valid token", "DENY proof_of_possession_failed", r,
+           r.get("reason") == "proof_of_possession_failed")
 
-    attacker_key = generate_keypair()  # attacker has the token bytes but NOT temp01's private key
-    nonce = "n-attacker-1"
-    forged_sig = sign(attacker_key, access_message(token["token_id"], token["did"], nonce)).hex()
-    r = client.post("/tokens/access", json={"token": token, "nonce": nonce, "signature": forged_sig, "operation": "read"})
-    info("attack", f"attacker replays the token, signs with the wrong key -> {r.json()}")
-    record("stolen token without the private key", r.json()["reason"] == "proof_of_possession_failed")
 
-
-def attack_expired_and_revoked():
+def attack_expired_token():
     step("ATTACK 3a: expired token")
-    app, client, psk = make_env()
-    d, _ = get_token(client, "temp01", psk)
-    short_token = issue_token(d.did, d.public_key_hex, "temperature_sensor", "sensor",
-                              app.state.ctx.signing_key, ttl_seconds=0.3)  # issued directly with a tiny TTL
+    app, client, psks = make_env()
+    d = queued_device(client, psks)
+    ctx = app.state.ctx
+    # issued by the fog's real issuer, only with a 0.3 s lifetime so expiry can be shown live
+    token = issue_token(d.did, d.public_key_hex, "temperature_sensor", "sensor", ctx.signing_key, ttl_seconds=0.3)
+    ctx.token_state.record_issued(token["token_id"], d.did)
     time.sleep(0.4)
-    nonce = "n-exp-1"
-    sig = sign(d.private_key, access_message(short_token["token_id"], short_token["did"], nonce)).hex()
-    r = client.post("/tokens/access", json={"token": short_token, "nonce": nonce, "signature": sig, "operation": "read"})
-    info("attack", f"token used after its real expiry -> {r.json()}")
-    record("expired token rejected", r.json()["reason"] == "expired")
+    r, _ = token_access(d, token, RESOURCE, OPERATION)
+    info("attack", f"genuine token, fresh nonce, correct signature, used after expiry -> {r}")
+    record("3a expired token", "DENY expired", r, r.get("reason") == "expired")
 
-    step("ATTACK 3b: revoked device's token")
-    app2, client2, psk2 = make_env()
-    d2, token2 = get_token(client2, "temp01", psk2)
-    revoke_device(app2.state.ctx.devices, token2["did"])
-    nonce2 = "n-rev-1"
-    sig2 = sign(d2.private_key, access_message(token2["token_id"], token2["did"], nonce2)).hex()
-    r2 = client2.post("/tokens/access", json={"token": token2, "nonce": nonce2, "signature": sig2, "operation": "read"})
-    info("attack", f"revoked device tries to use its token -> {r2.json()}")
-    record("revoked device's token rejected", r2.json()["reason"] == "revoked")
+
+def attack_revoked_token():
+    step("ATTACK 3b: revoked token")
+    _, client, psks = make_env()
+    d = queued_device(client, psks)
+    token = request_token(d)
+    before, _ = token_access(d, token, RESOURCE, OPERATION)
+    client.post("/revocation/revoke", json={"did": d.did}, headers=ADMIN)
+    after, _ = token_access(d, token, RESOURCE, OPERATION)
+    info("attack", f"before revocation -> {before['decision']}; right after revocation -> {after}")
+    record("3b revoked token", "DENY revoked", after,
+           before["decision"] == "ALLOW" and after.get("reason") == "revoked")
 
 
 def main():
     attack_replay()
     attack_stolen_token()
-    attack_expired_and_revoked()
+    attack_expired_token()
+    attack_revoked_token()
+
     step("SUMMARY")
-    for title, passed in results:
-        print(f"   {title:<50} {'PASS' if passed else 'FAIL'}")
-    (ok if all(p for _, p in results) else fail)("attack", "all attacks detected" if all(p for _, p in results) else "SOME NOT DETECTED")
+    print(f"   {'attack':<28} {'decision':<9} {'reason':<28} {'detected by':<28} ok")
+    for row in results:
+        print(f"   {row['attack']:<28} {row['decision']:<9} {row['reason']:<28} {row['detected_by']:<28} "
+              f"{row['as_expected']}")
+    RESULTS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with RESULTS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
+        writer.writeheader()
+        writer.writerows(results)
+    info("attack", f"results saved to {RESULTS_CSV.relative_to(RESULTS_CSV.parents[2])}")
+    all_ok = all(r["as_expected"] == "yes" for r in results)
+    (ok if all_ok else fail)("attack", "every attack was detected" if all_ok else "SOME ATTACKS WERE NOT DETECTED")
+    return all_ok
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

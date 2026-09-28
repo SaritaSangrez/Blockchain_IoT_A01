@@ -73,39 +73,57 @@ CSV files go to `benchmarks/results`, graphs to `benchmarks/graphs`.
 | GET | /registry/verify | verify the ledger hash chain |
 | GET | /health | fog status |
 
-Additional endpoint table rows:
+Phase 2 / Phase 3 / revocation endpoints (Member B):
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/tokens/issue` | temporary signed token for a device waiting on the batch |
-| POST | `/tokens/access` | token + fresh nonce + fresh PoP signature -> ALLOW/DENY |
-| POST | `/verify` | Merkle proof + revocation + access-policy check -> ALLOW/DENY |
-| POST | `/revocation/revoke` | admin: revoke a device (and optionally one `token_id`) immediately |
-| GET | `/revocation/status/{did}` | current revocation status |
+| POST | `/tokens/issue` | `{session_id}` of a device that passed PoP AND is queued (`/register/metadata` done) -> short-lived fog-signed token; type and role come from the fog's validated record |
+| POST | `/tokens/nonce` | `{token_id}` -> fresh fog-issued nonce (single use, 30 s) |
+| POST | `/tokens/access` | `{token, nonce, resource, operation, signature}` -> ALLOW/DENY. Checks token signature, expiry, nonce, revocation, device signature (PoP), provisional scope (read/write on own type only), policy |
+| POST | `/verify/nonce` | `{did}` -> fresh fog-issued nonce (single use, 30 s) |
+| POST | `/verify` | `{proof_package, resource, operation, nonce, signature}` -> ALLOW/DENY. Checks nonce, Merkle proof against the anchored root, PoP, current status/revocation, role/type, policy |
+| POST | `/revocation/revoke` | admin (`X-Admin-Key`): `{did}` revokes the device and all its tokens; `{did, token_id, token_only: true}` revokes one token only |
+| GET | `/revocation/status/{did}` | current status, token states, and whether the device is in the latest epoch root |
+
+Device side helpers for these calls: `devices/runtime_client.py`.
 
 
 ## Phase 2 / 3 demo, attacks, benchmarks, tests (Member B)
 
-Terminal 2, Phase 2/3 demo (demo steps 6 to 10):
+Terminal 2, Phase 2/3 demo (demo steps 6 to 10). Run it right after
+`demo_phase1.py` without restarting the fog, so the tree holds all devices:
 
 ```
 python scripts\demo_phase2.py --pause
 ```
 
-Token/revocation attacks:
+Quick check without a separate fog (in-process fog, temporary ledger):
+
+```
+python scripts\demo_phase2.py --inprocess
+```
+
+Attacks (replay, stolen token, stolen proof package, expired/revoked token,
+forged token, role escalation); results also saved to
+`benchmarks\results\attack_token_results.csv`:
 
 ```
 python attacks\token_attacks.py
 ```
 
-Verification / token-access / throughput benchmarks:
+Verification / token validation / resource access / throughput benchmark
+(fresh fog per device count, so the tree really has N leaves):
 
 ```
-python benchmarks\bench_verifications.py --runs 5 --counts 5 10 25 50 100
+python benchmarks\bench_verifications.py --runs 5 --counts 5 10 25 50 100 --workers 8
 ```
 
-Unit tests for policy, revocation and tokens:
+Output: `benchmarks\results\verification_raw.csv`, `verification_summary.csv`,
+`benchmarks\graphs\graph2_verification_latency.png`, `graph3_throughput.png`,
+`token_access_latency.png`.
+
+Tests for policy, nonces, tokens, revocation and the Phase 2/3 endpoints:
 
 ```
-pytest tests\test_member_b.py
+pytest tests\test_member_b.py -v
 ```
